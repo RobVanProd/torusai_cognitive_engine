@@ -26,8 +26,23 @@ try:
     STOP_WORDS = set(stopwords.words('english'))
 except ImportError:
     nltk = None # type: ignore
-    STOP_WORDS = set()
-    print("NLTK library not found. Text processing capabilities will be limited. Install via 'pip install nltk'")
+    STOP_WORDS = set() # type: ignore
+    # This print might be too verbose if NLTK is intentionally not used when spaCy is primary.
+    # print("NLTK library not found. Some fallback text processing capabilities will be limited. Install via 'pip install nltk'")
+
+# Attempt to import spacy, provide guidance if missing
+try:
+    import spacy
+    # Load a spaCy model. You might want to make this configurable.
+    # Small model for efficiency, larger models (md, lg) for accuracy.
+    try:
+        NLP_SPACY = spacy.load('en_core_web_sm')
+    except OSError:
+        print("spaCy 'en_core_web_sm' model not found. Please run: python -m spacy download en_core_web_sm")
+        NLP_SPACY = None
+except ImportError:
+    NLP_SPACY = None # type: ignore
+    print("spaCy library not found. Advanced NLP features will be unavailable. Install via 'pip install spacy' and download a model.")
 
 
 def simple_chunker(text: str, chunk_size: int = 200, overlap: int = 50) -> List[str]:
@@ -82,70 +97,167 @@ def extract_concepts_from_chunk_simple(text_chunk: str) -> List[str]:
     # Deduplicate while preserving order (somewhat) and limit
     return list(dict.fromkeys(concepts))[:15] # Limit concepts per chunk
 
+def extract_concepts_relationships_spacy(text_chunk: str, cg: 'EnhancedConceptGraph') -> None:
+    """
+    Extracts concepts (noun chunks, named entities) and basic SVO relationships
+    from a text chunk using spaCy and populates the concept graph.
+    """
+    if not NLP_SPACY:
+        print("spaCy model not loaded. Cannot perform advanced NLP extraction.")
+        # Fallback to simple NLTK-based concept extraction for this chunk
+        concepts_in_chunk = extract_concepts_from_chunk_simple(text_chunk)
+        for concept_word in concepts_in_chunk:
+            cid = concept_word
+            if cid not in cg.nodes:
+                cg.addEnhancedNode(cid, properties={"source": "document_import_nltk_fallback"},
+                                   linguistics={"wordForms": {"base": concept_word}})
+            else:
+                cg.nodes[cid]["doc_freq"] = cg.nodes[cid].get("doc_freq", 0) + 1
+        # Simple co-occurrence for fallback
+        for i in range(len(concepts_in_chunk)):
+            for j in range(i + 1, len(concepts_in_chunk)):
+                s_cid, t_cid = concepts_in_chunk[i], concepts_in_chunk[j]
+                if not cg.edges.get((s_cid, t_cid)):
+                    cg.addEdge(s_cid, t_cid, relation="co-occurs_doc_fallback", weight=0.2)
+        return
+
+    doc = NLP_SPACY(text_chunk)
+    
+    # 1. Extract Named Entities and Noun Chunks as concepts
+    extracted_concept_texts = set() # To avoid duplicate node additions from same chunk text
+
+    for ent in doc.ents:
+        ent_text = ent.text.lower().strip()
+        if ent_text and len(ent_text) > 1: # Basic filter
+            extracted_concept_texts.add(ent_text)
+            if ent_text not in cg.nodes:
+                cg.addEnhancedNode(ent_text, properties={"source": "document_ner", "entity_type": ent.label_},
+                                   linguistics={"wordForms": {"base": ent_text}})
+            else:
+                cg.nodes[ent_text]["doc_freq"] = cg.nodes[ent_text].get("doc_freq", 0) + 1
+                if "entity_type" not in cg.nodes[ent_text] and ent.label_: # Add entity type if missing
+                    cg.nodes[ent_text]["entity_type"] = ent.label_
+
+
+    for chunk in doc.noun_chunks:
+        chunk_text = chunk.text.lower().strip()
+        # Further clean noun chunks: remove leading/trailing stopwords or articles if desired
+        # For now, use the chunk as is if it's meaningful
+        if chunk_text and len(chunk_text) > 2 and chunk_text not in STOP_WORDS: # Basic filter
+            extracted_concept_texts.add(chunk_text)
+            if chunk_text not in cg.nodes:
+                cg.addEnhancedNode(chunk_text, properties={"source": "document_noun_chunk"},
+                                   linguistics={"wordForms": {"base": chunk_text}})
+            else:
+                cg.nodes[chunk_text]["doc_freq"] = cg.nodes[chunk_text].get("doc_freq", 0) + 1
+    
+    # 2. Extract basic SVO-like relationships using dependency parsing
+    for sent in doc.sents:
+        # Example: Find simple nsubj-verb-dobj relations
+        # This is a very simplified SVO extraction. Real SVO is more complex.
+        subjects = [token for token in sent if token.dep_ == "nsubj" or token.dep_ == "nsubjpass"]
+        direct_objects = [token for token in sent if token.dep_ == "dobj" or token.dep_ == "pobj"] # pobj for prepositional objects
+        
+        for token in sent:
+            if token.pos_ == "VERB":
+                verb_text = token.lemma_.lower() # Use lemma for verb
+                # Add verb as a concept if it's not a stopword (auxiliaries might be filtered)
+                if verb_text not in cg.nodes and verb_text not in STOP_WORDS and len(verb_text) > 1:
+                    cg.addEnhancedNode(verb_text, properties={"source": "document_verb", "pos": "VERB"},
+                                       linguistics={"wordForms": {"base": verb_text}})
+                
+                for subj_token in subjects:
+                    # Use noun chunk text if subject is part of one, otherwise lemma
+                    subj_concept = next((nc.text.lower().strip() for nc in doc.noun_chunks if nc.start <= subj_token.i < nc.end), subj_token.lemma_.lower())
+                    if subj_concept not in extracted_concept_texts and subj_concept not in cg.nodes: # Add if new
+                         if len(subj_concept)>1 and subj_concept not in STOP_WORDS :
+                            cg.addEnhancedNode(subj_concept, properties={"source":"document_subj"}, linguistics={"wordForms":{"base":subj_concept}})
+                            extracted_concept_texts.add(subj_concept)
+
+
+                    if subj_concept in cg.nodes and verb_text in cg.nodes:
+                         # Relation: subject -> verb
+                        if not cg.edges.get((subj_concept, verb_text)):
+                            cg.addEdge(subj_concept, verb_text, relation="subject_of", weight=0.5)
+                        else:
+                            cg.edges[(subj_concept, verb_text)]["weight"] = min(cg.edges[(subj_concept, verb_text)].get("weight",0)+0.1, 5.0)
+
+
+                    for obj_token in direct_objects:
+                        # Use noun chunk text if object is part of one, otherwise lemma
+                        obj_concept = next((nc.text.lower().strip() for nc in doc.noun_chunks if nc.start <= obj_token.i < nc.end), obj_token.lemma_.lower())
+                        if obj_concept not in extracted_concept_texts and obj_concept not in cg.nodes: # Add if new
+                            if len(obj_concept)>1 and obj_concept not in STOP_WORDS:
+                                cg.addEnhancedNode(obj_concept, properties={"source":"document_obj"}, linguistics={"wordForms":{"base":obj_concept}})
+                                extracted_concept_texts.add(obj_concept)
+                        
+                        if verb_text in cg.nodes and obj_concept in cg.nodes:
+                            # Relation: verb -> object
+                            if not cg.edges.get((verb_text, obj_concept)):
+                                cg.addEdge(verb_text, obj_concept, relation="direct_object_of" if obj_token.dep_ == "dobj" else "prepositional_object_of", weight=0.5)
+                            else:
+                                cg.edges[(verb_text, obj_concept)]["weight"] = min(cg.edges[(verb_text, obj_concept)].get("weight",0)+0.1, 5.0)
+                        
+                        # Also connect subject directly to object with verb as relation for some contexts
+                        if subj_concept in cg.nodes and obj_concept in cg.nodes:
+                            if not cg.edges.get((subj_concept, obj_concept)) or cg.edges.get((subj_concept, obj_concept),{}).get("relation") != verb_text : # Avoid overwriting stronger relations
+                                cg.addEdge(subj_concept, obj_concept, relation=f"verb_{verb_text}", weight=0.4)
+
+
 def populate_graph_from_text(text: str, cg: 'EnhancedConceptGraph', engine_state: Dict[str, Any]) -> None:
     """
-    Processes a block of text, extracts concepts, and populates the concept graph.
+    Processes a block of text, extracts concepts and relationships,
+    and populates the concept graph. Uses spaCy if available, otherwise NLTK fallback.
 
     Args:
         text: The input text to process.
         cg: The EnhancedConceptGraph instance to populate.
-        engine_state: The shared engine state (currently unused in this basic version).
+        engine_state: The shared engine state (currently unused in this version).
     """
     print(f"Populating graph from text (length: {len(text)})...")
     if not text.strip():
         print("No text content to process.")
         return
 
-    # For now, using a very simple chunking and concept extraction.
-    # This would be a key area for more sophisticated NLP.
-    
-    chunks = simple_chunker(text, chunk_size=150, overlap=30) # Smaller chunks for more connections
-    
-    processed_chunks = 0
-    for chunk_index, chunk in enumerate(chunks):
-        if not chunk.strip():
-            continue
+    # Using spaCy for sentence segmentation and richer NLP if available
+    if NLP_SPACY:
+        doc = NLP_SPACY(text)
+        sentences = [sent.text for sent in doc.sents]
+        print(f"Using spaCy for processing. Found {len(sentences)} sentences.")
+    elif nltk: # Fallback to NLTK sentence tokenizer
+        sentences = sent_tokenize(text)
+        print(f"Using NLTK for sentence tokenization. Found {len(sentences)} sentences.")
+    else: # Very basic fallback if no NLP library
+        sentences = text.split('.') # Simplistic sentence split
+        print(f"No NLP library (spaCy/NLTK) for sentence tokenization. Using basic split. Found {len(sentences)} potential sentences.")
 
-        concepts_in_chunk = extract_concepts_from_chunk_simple(chunk)
+    processed_sentences = 0
+    for sentence_text in sentences:
+        if not sentence_text.strip():
+            continue
         
-        if not concepts_in_chunk:
-            continue
-
-        # Add concepts as nodes
-        for concept_word in concepts_in_chunk:
-            # Use the word itself as CID for simplicity. Could be normalized further.
-            cid = concept_word 
-            if cid not in cg.nodes:
-                cg.addEnhancedNode(cid, properties={"source": "document_import"}, 
-                                   linguistics={"wordForms": {"base": concept_word}})
-            else: # Increment a counter or update a property if node exists
-                cg.nodes[cid]["doc_freq"] = cg.nodes[cid].get("doc_freq", 0) + 1
-
-
-        # Add edges between co-occurring concepts in the chunk
-        # This creates a densely connected component for each chunk's concepts
-        for i in range(len(concepts_in_chunk)):
-            for j in range(i + 1, len(concepts_in_chunk)):
-                s_cid = concepts_in_chunk[i]
-                t_cid = concepts_in_chunk[j]
-                
-                # Add edges in both directions or choose one based on desired graph structure
-                # For now, adding one way. Could also adjust weight based on co-occurrence.
-                if not cg.edges.get((s_cid, t_cid)):
-                    cg.addEdge(s_cid, t_cid, relation="co-occurs_doc", weight=0.3) 
-                else: # Increment weight if edge exists
-                    current_weight = cg.edges[(s_cid, t_cid)].get("weight", 0.0)
-                    cg.edges[(s_cid, t_cid)]["weight"] = min(current_weight + 0.1, 5.0)
-
-
-                # Optionally, add reverse edge for undirected feel for co-occurrence
-                # if not cg.edges.get((t_cid, s_cid)):
-                #    cg.addEdge(t_cid, s_cid, relation="co-occurs_doc", weight=0.3)
-
-
-        processed_chunks +=1
-        if processed_chunks % 10 == 0:
-            print(f"Processed {processed_chunks}/{len(chunks)} chunks...")
+        if NLP_SPACY:
+            extract_concepts_relationships_spacy(sentence_text, cg)
+        else:
+            # Fallback to simpler NLTK-based concept extraction and co-occurrence links per sentence
+            concepts_in_sentence = extract_concepts_from_chunk_simple(sentence_text)
+            for concept_word in concepts_in_sentence:
+                cid = concept_word
+                if cid not in cg.nodes:
+                    cg.addEnhancedNode(cid, properties={"source": "document_import_nltk"},
+                                       linguistics={"wordForms": {"base": concept_word}})
+                else:
+                    cg.nodes[cid]["doc_freq"] = cg.nodes[cid].get("doc_freq", 0) + 1
+            
+            for i in range(len(concepts_in_sentence)):
+                for j in range(i + 1, len(concepts_in_sentence)):
+                    s_cid, t_cid = concepts_in_sentence[i], concepts_in_sentence[j]
+                    if not cg.edges.get((s_cid, t_cid)):
+                        cg.addEdge(s_cid, t_cid, relation="co-occurs_sent_nltk", weight=0.1)
+        
+        processed_sentences += 1
+        if processed_sentences % 50 == 0: # Log progress every 50 sentences
+            print(f"Processed {processed_sentences}/{len(sentences)} sentences...")
 
     print(f"Finished populating graph. Total nodes: {len(cg.nodes)}, Total edges: {len(cg.edges)}")
 
