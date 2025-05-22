@@ -75,40 +75,101 @@ class EnhancedLanguageGenerator:
             return self._conjugate_present(base_form, is_plural_subject)
         return base_form # Default fallback
 
-    def generate(self, query_string: str) -> str:
+    def generate(self, query_string: str, engine_state: Optional[Dict[str, Any]] = None) -> str:
         """
-        Generates a sentence based on the current active concepts and the query type.
+        Generates a sentence based on the current engine state (active concepts,
+        reflection, retrieved patterns) and the query type.
 
         Args:
             query_string: The input query string, used to determine if a question
-                          or statement template should be used.
+                          or statement template should be used and potentially for context.
+            engine_state: The shared engine state dictionary, providing context like
+                          'reflection' and 'retrieved_patterns'.
 
         Returns:
             The generated sentence as a string.
         """
-        active_concepts: List[Dict[str, Any]] = self.cg.getActiveConceptPath()
-        
-        # Determine subject, verb, object CIDs from active concepts, with defaults
-        subj_cid = active_concepts[0]["id"] if len(active_concepts) > 0 else self.DEFAULT_SUBJECT_CID
-        verb_cid = active_concepts[1]["id"] if len(active_concepts) > 1 else self.DEFAULT_VERB_CID
-        obj_cid = active_concepts[2]["id"] if len(active_concepts) > 2 else self.DEFAULT_OBJECT_CID
+        if engine_state is None:
+            engine_state = {}
 
-        # Ensure default concepts exist in the graph for generation if they are to be used.
-        # This side-effect of adding nodes during generation might be better handled
-        # by pre-populating essential default nodes or having robust fallback in _get_concept_word.
-        if subj_cid == self.DEFAULT_SUBJECT_CID and subj_cid not in self.cg.nodes:
-            self.cg.addEnhancedNode(subj_cid, linguistics={"wordForms": {"base": self.DEFAULT_SUBJECT_WORD}})
-        if verb_cid == self.DEFAULT_VERB_CID and verb_cid not in self.cg.nodes:
-            self.cg.addEnhancedNode(verb_cid, linguistics={"wordForms": {"base": self.DEFAULT_VERB_WORD}})
-        if obj_cid == self.DEFAULT_OBJECT_CID and obj_cid not in self.cg.nodes:
-            self.cg.addEnhancedNode(obj_cid, linguistics={"wordForms": {"base": self.DEFAULT_OBJECT_WORD}})
-        
-        # For this basic generator, assume subject is singular unless more sophisticated logic is added.
-        # TODO: Determine plurality from node data or query context.
-        is_plural_subject = False
+        generated_sentence = ""
+        is_plural_subject = False # TODO: Determine from context or node data
 
+        # 1. Try to use retrieved patterns if available and relevant
+        retrieved_patterns: List[Tuple[str, str, Dict[str, Any], float]] = engine_state.get("retrieved_patterns", [])
+        if retrieved_patterns and retrieved_patterns[0][3] > 0.7: # High similarity threshold for using pattern
+            # Use the response from the best matching pattern
+            # TODO: Adapt this response using current context if possible. For now, direct use.
+            generated_sentence = retrieved_patterns[0][1] # response part of the tuple
+            self.narrative.append(f"[PatternBased] {generated_sentence}")
+            return generated_sentence
+
+        # 2. If no strong pattern, use reflection or active concepts
+        source_concepts: List[Dict[str, Any]] = engine_state.get("reflection", [])
+        if not source_concepts: # Fallback to general active concepts
+            source_concepts = self.cg.getActiveConceptPath(threshold=0.5) # Slightly lower threshold for generation
+
+        if not source_concepts: # Still no concepts to work with
+            generated_sentence = "I'm not sure what to say about that."
+            self.narrative.append(generated_sentence)
+            return generated_sentence
+            
+        # Attempt to build a sentence from source_concepts (simplified graph traversal idea)
+        # This is a placeholder for more sophisticated graph-to-text logic.
+        
+        # Try to find SVO from reflection/active concepts
+        # This logic is still very basic and relies on the order from getActiveConceptPath
+        # or the structure of reflection.
+        
+        subj_cid = source_concepts[0].get("id", self.DEFAULT_SUBJECT_CID) if len(source_concepts) > 0 else self.DEFAULT_SUBJECT_CID
+        
+        # Try to find a verb related to the subject
+        verb_cid = self.DEFAULT_VERB_CID
+        obj_cid = self.DEFAULT_OBJECT_CID
+
+        # Simple graph traversal: look for an outgoing edge from subject that might be a verb or lead to an object
+        # This is highly experimental and needs refinement.
+        if subj_cid in self.cg.nodes:
+            potential_verbs_objects = []
+            for (s, t), edge_data in self.cg.edges.items():
+                if s == subj_cid:
+                    # If edge relation itself is verb-like or t is a verb concept
+                    relation_is_verb = edge_data.get("relation", "").startswith("verb_") or \
+                                       self.cg.nodes.get(t, {}).get("properties", {}).get("pos") == "VERB"
+                    if relation_is_verb and t not in [subj_cid]: # Avoid self-loops as main verb
+                        verb_cid = t
+                        # Now look for an object connected to this verb
+                        for (s2, t2), edge_data2 in self.cg.edges.items():
+                            if s2 == verb_cid and t2 not in [subj_cid, verb_cid]:
+                                obj_cid = t2
+                                potential_verbs_objects.append((verb_cid, obj_cid, edge_data.get("weight",0) + edge_data2.get("weight",0)))
+                                break # Found one SVO path
+                        if not potential_verbs_objects or obj_cid == self.DEFAULT_OBJECT_CID : # if verb found but no object from it
+                             potential_verbs_objects.append((verb_cid, self.DEFAULT_OBJECT_CID, edge_data.get("weight",0)))
+                        break # Found a primary verb for the subject
+            
+            if potential_verbs_objects: # Pick the one with highest combined weight if multiple
+                potential_verbs_objects.sort(key=lambda x: -x[2])
+                verb_cid = potential_verbs_objects[0][0]
+                obj_cid = potential_verbs_objects[0][1]
+            elif len(source_concepts) > 1 : # Fallback to second active concept as verb if no relation found
+                 verb_cid = source_concepts[1].get("id", self.DEFAULT_VERB_CID)
+                 if len(source_concepts) > 2:
+                     obj_cid = source_concepts[2].get("id", self.DEFAULT_OBJECT_CID)
+
+
+        # Ensure default concepts exist if they are to be used
+        default_nodes_to_add = {
+            self.DEFAULT_SUBJECT_CID: self.DEFAULT_SUBJECT_WORD,
+            self.DEFAULT_VERB_CID: self.DEFAULT_VERB_WORD,
+            self.DEFAULT_OBJECT_CID: self.DEFAULT_OBJECT_WORD
+        }
+        for cid_default, word_default in default_nodes_to_add.items():
+            if cid_default in [subj_cid, verb_cid, obj_cid] and cid_default not in self.cg.nodes:
+                self.cg.addEnhancedNode(cid_default, linguistics={"wordForms": {"base": word_default}})
+        
         template_key = "question_what" if "?" in query_string else "statement"
-        chosen_template = self.templates.get(template_key, self.templates["statement"]) # Fallback to statement
+        chosen_template = self.templates.get(template_key, self.templates["statement"])
         
         generated_sentence = chosen_template.format(
             subject=self._get_concept_word(subj_cid, "subject", is_plural_subject),
