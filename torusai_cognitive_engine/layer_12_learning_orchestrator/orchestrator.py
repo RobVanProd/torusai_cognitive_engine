@@ -152,8 +152,12 @@ class LearningOrchestrator:
     """
     Manages the learning process by recording salient (trigger, response) patterns
     from the engine's state and retrieving similar past patterns.
+    Includes conceptual hooks for regularization-replay for continual learning.
     Corresponds to L12 Learning Orchestrator in the 15-layer specification.
     """
+    REPLAY_BUFFER_MAX_SIZE: int = 1000 # Max items in conceptual replay buffer
+    REPLAY_SAMPLE_PROB: float = 0.1 # Probability of adding a pattern to replay buffer
+
     def __init__(self, shared_engine_state: Dict[str, Any]):
         """
         Initializes the LearningOrchestrator.
@@ -161,10 +165,13 @@ class LearningOrchestrator:
         Args:
             shared_engine_state: A reference to the main engine's shared state dictionary.
                                  This state is used to get reflection, last_response, etc.,
-                                 and to store retrieved_patterns.
+                                 store retrieved_patterns, and manage the replay_buffer.
         """
         self.state: Dict[str, Any] = shared_engine_state
         self.pattern_memory: PatternMemory = PatternMemory()
+        if "replay_buffer" not in self.state: # Ensure replay buffer is initialized
+            self.state["replay_buffer"] = deque(maxlen=self.REPLAY_BUFFER_MAX_SIZE)
+
 
     def _create_reflection_key(self, reflection_data: Any) -> str:
         """
@@ -200,9 +207,37 @@ class LearningOrchestrator:
 
         reflection_key: str = self._create_reflection_key(reflection_data)
 
-        if reflection_key and last_response_str: # Only record if both are meaningful
+        if reflection_key and last_response_str:
             meta_data = {"valence_at_recording": current_valence, "timestamp": time.time()}
+            
+            # Conceptual: Regularization using C-VAE and replay buffer before recording new pattern
+            # if C_VAE_MODEL and self.state["replay_buffer"]:
+            #     replayed_samples = sample_from_replay_buffer(self.state["replay_buffer"], k=5)
+            #     pseudo_data_from_cvae = C_VAE_MODEL.generate(conditions_from_replayed_samples)
+            #     # Incorporate pseudo_data_from_cvae into any training/update step
+            #     # for the embedding model or PatternMemory's internal representations.
+            #     # This is highly dependent on the specific continual learning setup.
+            #     pass
+
             self.pattern_memory.record(reflection_key, last_response_str, meta=meta_data)
+
+            # Conceptual: Add to replay buffer
+            # This could be more sophisticated (e.g., based on surprise, importance)
+            if random.random() < self.REPLAY_SAMPLE_PROB:
+                # Store relevant parts for replay, e.g., the trigger embedding and context
+                # For simplicity, storing the recorded pattern itself.
+                # A real replay buffer might store (trigger_embedding, response_context_embedding, etc.)
+                if self.pattern_memory.buf: # Ensure buf is not empty
+                    # Get the embedding of the just recorded trigger if available
+                    last_recorded_trigger_embedding = self.pattern_memory.buf[-1][3] if len(self.pattern_memory.buf[-1]) > 3 else None
+                    if last_recorded_trigger_embedding is not None:
+                         self.state["replay_buffer"].append(
+                             {"trigger": reflection_key,
+                              "response": last_response_str,
+                              "meta": meta_data,
+                              "trigger_embedding": last_recorded_trigger_embedding # Store for C-VAE training
+                              }
+                            )
         
         if reflection_key:
             retrieved_patterns: List[Tuple[str, str, Dict[str, Any], float]] = self.pattern_memory.nearest(reflection_key)

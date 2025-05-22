@@ -58,10 +58,11 @@ class TorusEngine:
             "last_response": "", # Last generated linguistic response
             "valence": 0.0, # Current affective valence (-1.0 to 1.0)
             "reflection": [], # List of concepts from symbolic reflection
-            "metrics": {}, # Dictionary of graph/engine metrics
-            "clusters": {}, # Dictionary of concept clusters
-            "dream_log": [], # List of strings representing dream narratives
-            "retrieved_patterns": [] # List of patterns retrieved by LearningOrchestrator
+            "metrics": {},
+            "clusters": {},
+            "dream_log": [],
+            "retrieved_patterns": [],
+            "replay_buffer": [] # For Step E: Regularisation-replay buffer
         }
 
         # Instantiate layers (L0-L14 based on 15-Layer spec)
