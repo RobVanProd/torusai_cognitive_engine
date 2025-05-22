@@ -52,3 +52,7 @@ checkpoints/
 # Local development
 .env
 .DS_Store
+
+# Generated output files
+stress_test_results.txt
+.coverage

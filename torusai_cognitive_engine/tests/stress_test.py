@@ -61,4 +61,20 @@ def run_stress_test(cg_class, lg_class, engine_class):
         "dreams_logged": engine_instance.state.get("dream_log", []), # Access dream_log from engine's state
         "narrative_samples": narrative_log[-5:] # narrative_log is directly modified by lg_instance
     }
+
+    # Save results to a TXT file
+    try:
+        with open("stress_test_results.txt", "w") as f:
+            f.write("--- Stress Test Results ---\n")
+            for key, value in results.items():
+                if isinstance(value, list) and key in ["dreams_logged", "narrative_samples"]:
+                    f.write(f"{key}:\n")
+                    for item_val in value:
+                        f.write(f"  - {item_val}\n")
+                else:
+                    f.write(f"{key}: {value}\n")
+        print("\nStress test results saved to stress_test_results.txt")
+    except Exception as e:
+        print(f"\nError saving stress test results to file: {e}")
+
     return results
