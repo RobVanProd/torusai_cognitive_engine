@@ -13,3 +13,7 @@ python-docx>=1.0.0 # For DOCX parsing
 nltk>=3.8 # For text processing (tokenization, stopwords, POS tagging)
 sentence-transformers>=2.2.0 # For text embeddings
 spacy>=3.0.0 # For advanced NLP (NER, Dependency Parsing, Noun Chunks)
+# Add a placeholder for UIE model/library; specific library depends on chosen model
+# Example: opennre or a specific transformers-based UIE model's requirements
+# For now, let's assume the chosen UIE might need something like this, or just transformers
+# openhgnn # Placeholder for potential GNN-based UIE or OpenNRE-like dependency
