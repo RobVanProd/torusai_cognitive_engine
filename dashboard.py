@@ -65,29 +65,45 @@ chat_history: list = st.session_state.chat_history
 st.sidebar.divider()
 st.sidebar.header("📄 Document Processing")
 uploaded_doc = st.sidebar.file_uploader("Upload Document (PDF, DOCX, TXT)", type=['pdf', 'docx', 'txt'], key="doc_uploader")
+post_process_cycles = st.sidebar.number_input("Post-Processing Dream Cycles:", min_value=0, value=3, step=1, key="post_process_cycles",
+                                             help="Number of dream cycles to run after document processing to help integrate new information.")
 
 if st.sidebar.button("Process Uploaded Document", key="process_doc_btn"):
     if uploaded_doc is not None:
         with st.spinner(f"Processing {uploaded_doc.name}..."):
             try:
-                # parse_document expects a file-like object (BytesIO for uploaded files) and filename
                 document_text = parse_document(uploaded_doc, uploaded_doc.name)
                 if document_text:
                     st.sidebar.success(f"Extracted {len(document_text)} characters from {uploaded_doc.name}.")
-                    # Populate graph (modifies engine.cg in place)
-                    populate_graph_from_text(document_text, engine.cg, engine.state)
-                    st.sidebar.success(f"Document content processed into concept graph.")
-                    # Update chat history
+                    
+                    with st.spinner("Populating concept graph from document..."):
+                        populate_graph_from_text(document_text, engine.cg, engine.state)
+                    st.sidebar.success(f"Document content processed. Graph: {len(engine.cg.nodes)} nodes, {len(engine.cg.edges)} edges.")
+                    
                     chat_history.append({
                         "query": f"Processed Document: {uploaded_doc.name}",
                         "response": f"Extracted {len(document_text)} chars. Nodes: {len(engine.cg.nodes)}, Edges: {len(engine.cg.edges)}",
                         "type": "system"
                     })
+
+                    if post_process_cycles > 0:
+                        st.sidebar.info(f"Running {post_process_cycles} post-processing dream cycles...")
+                        progress_bar = st.sidebar.progress(0)
+                        for i in range(post_process_cycles):
+                            engine.dream_cycle_execution()
+                            progress_bar.progress((i + 1) / post_process_cycles)
+                        st.sidebar.success(f"Finished {post_process_cycles} post-processing cycles.")
+                        chat_history.append({
+                            "query": "Post-Processing Complete",
+                            "response": f"Ran {post_process_cycles} dream cycles. Final dream log entry: {engine.state.get('dream_log', ['N/A'])[-1]}",
+                            "type": "system"
+                        })
                     st.rerun()
                 else:
                     st.sidebar.error(f"Could not extract text from {uploaded_doc.name}.")
             except Exception as e:
                 st.sidebar.error(f"Error processing document: {e}")
+                st.exception(e) # Show full traceback in sidebar for debugging
     else:
         st.sidebar.warning("Please upload a document first.")
 
