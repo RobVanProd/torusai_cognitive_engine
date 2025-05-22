@@ -17,3 +17,6 @@ spacy>=3.0.0 # For advanced NLP (NER, Dependency Parsing, Noun Chunks)
 # Example: opennre or a specific transformers-based UIE model's requirements
 # For now, let's assume the chosen UIE might need something like this, or just transformers
 # openhgnn # Placeholder for potential GNN-based UIE or OpenNRE-like dependency
+transformers
+torch
+sentencepiece
