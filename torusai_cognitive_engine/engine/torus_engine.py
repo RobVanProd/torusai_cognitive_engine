@@ -44,7 +44,10 @@ class TorusEngine:
         self.prune_threshold: float = self.params.get('prune_threshold', 0.2)
         self.dream_n_candidates: int = self.params.get('dream_n_candidates', 5)
         self.dream_keep_top_k: int = self.params.get('dream_keep_top_k', 2)
-        self.low_ticks: int = self.params.get('low_ticks', 3) # General ticks for non-query cycles if needed
+        self.low_ticks: int = self.params.get('low_ticks', 3)
+        self.commonsense_boost_factor: float = self.params.get('commonsense_boost_factor', 0.1) # How much to boost by
+        self.commonsense_max_hops: int = self.params.get('commonsense_max_hops', 2) # How far to traverse for commonsense neighbors
+        self.commonsense_relation_prefix: str = self.params.get('commonsense_relation_prefix', "cn_") # Prefix for ConceptNet relations
 
         # Initialize shared engine state. This state will be passed to layers that need it.
         # This dictionary holds dynamic information updated and used by various layers during a cycle.
@@ -91,46 +94,105 @@ class TorusEngine:
         self.l13_monitoring = MonitoringLayer()
         # L14 API Embedder / Interface
         self.l14_api_embedder = APIEmbedderLayer()
+
+    def _apply_commonsense_activation_boost(self) -> None:
+        """
+        Identifies salient concepts and temporarily boosts activation of their
+        commonsense neighbors (e.g., from ConceptNet) before L2 Dynamics.
+        """
+        if not self.cg or not self.cg.nodes:
+            return
+
+        salient_concepts_cids: List[str] = []
+        # Prioritize reflection, then query concepts (if parsed), then top active
+        reflection: List[Dict[str, Any]] = self.state.get("reflection", [])
+        if reflection:
+            salient_concepts_cids = [item.get("id") for item in reflection if item.get("id")]
+        
+        # TODO: Add logic to get key concepts from self.state["query"] if parsed by LG/spaCy
+        # For now, this is a simplified approach.
+
+        if not salient_concepts_cids: # Fallback to top N active if no reflection
+            active_nodes = self.cg.getActiveConceptPath(threshold=0.5) # Use a reasonable threshold
+            salient_concepts_cids = [item.get("id") for item in active_nodes[:3] if item.get("id")] # Top 3
+
+        if not salient_concepts_cids:
+            return
+
+        # print(f"DEBUG: Commonsense boost based on salient: {salient_concepts_cids}")
+
+        nodes_to_boost: Dict[str, float] = {} # cid: current_activation
+
+        for root_cid in salient_concepts_cids:
+            if root_cid not in self.cg.nodes:
+                continue
             
+            # BFS for 1 or 2 hops for commonsense relations
+            q: List[Tuple[str, int]] = [(root_cid, 0)] # (cid, hop_count)
+            visited_in_bfs = {root_cid}
+            head = 0
+            
+            while head < len(q):
+                curr_cid, hop = q[head]
+                head += 1
+
+                if hop >= self.commonsense_max_hops: # Max hops reached for this root
+                    continue
+
+                # Check outgoing edges
+                for (s, t), edge_data in self.cg.edges.items():
+                    if s == curr_cid and edge_data.get("relation","").startswith(self.commonsense_relation_prefix):
+                        if t not in visited_in_bfs:
+                            nodes_to_boost[t] = self.cg.getActivation(t) # Store current activation
+                            if hop + 1 < self.commonsense_max_hops:
+                                q.append((t, hop + 1))
+                                visited_in_bfs.add(t)
+                # Check incoming edges
+                for (s, t), edge_data in self.cg.edges.items():
+                     if t == curr_cid and edge_data.get("relation","").startswith(self.commonsense_relation_prefix):
+                        if s not in visited_in_bfs:
+                            nodes_to_boost[s] = self.cg.getActivation(s)
+                            if hop + 1 < self.commonsense_max_hops:
+                                q.append((s, hop + 1))
+                                visited_in_bfs.add(s)
+        
+        for cid_to_boost, current_act in nodes_to_boost.items():
+            if cid_to_boost in self.cg.nodes: # Ensure node still exists
+                boosted_activation = current_act + self.commonsense_boost_factor
+                self.cg.setActivation(cid_to_boost, boosted_activation) # Clamped in setActivation
+                # print(f"DEBUG: Commonsense boosted {cid_to_boost} from {current_act:.2f} to {boosted_activation:.2f}")
+
+
     def run_cycle(self, query: Optional[str] = None, is_dream_cycle: bool = False) -> Optional[str]:
         """
         Executes a single cognitive cycle, processing through all defined layers.
-        The behavior of the cycle can change based on whether it's a dream cycle
-        or a standard cycle processing a query.
-
-        Args:
-            query: An optional string representing the user's input or query.
-                   Typically provided for standard cycles.
-            is_dream_cycle: A boolean indicating if this is a dream cycle.
-                            Defaults to False.
-
-        Returns:
-            The linguistic response generated by the engine (if any),
-            or None if no response is generated (e.g., during a dream cycle).
         """
         self.state["query"] = query
-        if query and not is_dream_cycle: # Clear previous response only for new, non-dream queries
+        if query and not is_dream_cycle:
             self.state["last_response"] = ""
 
-        # --- Layer Execution Order (based on a general cognitive flow) ---
+        # --- Layer Execution Order ---
         
-        # L0 Geometry (Perception/Decay)
-        # Adjust decay rate based on cycle type
+        # L0 Geometry (Decay)
         current_decay = self.decay_dream if is_dream_cycle else self.decay_awake
         original_l0_decay = self.l0_geometry.decay_rate
         try:
             self.l0_geometry.decay_rate = current_decay
             self.l0_geometry.run(self.cg)
         finally:
-            self.l0_geometry.decay_rate = original_l0_decay # Ensure restoration
+            self.l0_geometry.decay_rate = original_l0_decay
 
-        # L1 Symbolic Tagging (Basic graph maintenance)
+        # L1 Symbolic Tagging
         self.l1_symbolic_tagging.run(self.state)
         
-        # L2 Activation Dynamics (Graph propagation)
+        # Pre-L2: Commonsense Activation Boost
+        if not is_dream_cycle: # Typically don't want external commonsense bias during internal dream consolidation
+            self._apply_commonsense_activation_boost()
+
+        # L2 Activation Dynamics
         self.l2_activation_dynamics.run(self.cg)
         
-        # L9 Affective Body (Update valence based on previous cycle's output if any)
+        # L9 Affective Body
         # This might run earlier or later depending on when last_response is finalized.
         # For now, run it before feedback modulation that might use the new valence.
         if not is_dream_cycle: # Affective body might not run or run differently during dreams
@@ -156,12 +218,12 @@ class TorusEngine:
         # Conditional Layer Execution (Dreaming vs. Query Processing)
         if is_dream_cycle:
             # L11 Offline Dreaming
-            self.l11_offline_dreaming.run(self.cg, self.state) # DreamLayer logs to state['dream_log']
+            self.l11_offline_dreaming.run(self.cg, self.state)
         elif query and self.lg:
-            # L8 Language Module (Generate response if query)
-            self.state["last_response"] = self.lg.generate(query)
+            # L8 Language Module - now takes engine_state
+            self.state["last_response"] = self.lg.generate(query, self.state)
         
-        # L10 Social Mind (Dampen activations if negative valence)
+        # L10 Social Mind
         # Run after L9 has potentially updated valence
         self.l10_social_mind.run(self.state)
         
