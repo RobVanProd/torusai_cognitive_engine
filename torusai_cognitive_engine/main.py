@@ -71,21 +71,21 @@ if __name__ == "__main__":
         exit(1)
 
     # --- Optional: Run Stress Test ---
-    # print("--- Running TorusAI Cognitive Engine Stress Test (via main.py) ---")
-    # stress_test_results = run_stress_test(
-    #     cg_class=EnhancedConceptGraph,
-    #     lg_class=EnhancedLanguageGenerator,
-    #     engine_class=TorusEngine
-    # )
-    # print("\n--- Stress Test Results ---")
-    # for key, value in stress_test_results.items():
-    #     if isinstance(value, list) and key in ["dreams_logged", "narrative_samples"]:
-    #         print(f"{key}:")
-    #         for item_idx, item_val in enumerate(value):
-    #             print(f"  - {item_val}")
-    #     else:
-    #         print(f"{key}: {value}")
-    # print("\n--- End of Stress Test ---")
+    print("--- Running TorusAI Cognitive Engine Stress Test (via main.py) ---")
+    stress_test_results = run_stress_test(
+        cg_class=EnhancedConceptGraph,
+        lg_class=EnhancedLanguageGenerator,
+        engine_class=TorusEngine
+    )
+    print("\n--- Stress Test Results ---")
+    for key, value in stress_test_results.items():
+        if isinstance(value, list) and key in ["dreams_logged", "narrative_samples"]:
+            print(f"{key}:")
+            for item_idx, item_val in enumerate(value): # Changed variable names to avoid conflict
+                print(f"  - {item_val}")
+        else:
+            print(f"{key}: {value}")
+    print("\n--- End of Stress Test ---")
 
 
     # --- Setup for Interactive Mode ---

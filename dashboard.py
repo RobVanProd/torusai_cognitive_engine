@@ -10,12 +10,16 @@ try:
     from torusai_cognitive_engine.layer_04_dcg.concept_graph import EnhancedConceptGraph
     from torusai_cognitive_engine.layer_13_imr.language_generator import EnhancedLanguageGenerator
     from torusai_cognitive_engine.engine.torus_engine import TorusEngine
+    from torusai_cognitive_engine.document_processor.parser import parse_document
+    from torusai_cognitive_engine.document_processor.text_to_graph import populate_graph_from_text
+    from torusai_cognitive_engine.document_processor.model_io import save_engine_state, load_engine_state
 except ImportError as e:
-    st.error(f"ImportError: {e}. Ensure 'torusai_cognitive_engine' is in the Python path.")
+    st.error(f"ImportError: {e}. Ensure 'torusai_cognitive_engine' and its submodules are in the Python path and all dependencies are installed (pdfplumber, python-docx, nltk).")
     st.stop()
 
+# --- Engine Initialization ---
 def initialize_engine():
-    """Initializes and returns the TorusEngine and its narrative log."""
+    """Initializes and returns a new TorusEngine instance and its narrative log."""
     cg = EnhancedConceptGraph()
     # Add some initial concepts for a richer interaction
     cg.addEnhancedNode("user", linguistics={"wordForms":{"base":"user"}}, properties={"type":"agent"})
@@ -53,9 +57,105 @@ if 'engine' not in st.session_state:
     st.session_state.narrative_log = narrative_log
     st.session_state.chat_history = [] # To store query-response pairs
 
-engine = st.session_state.engine
-narrative_log = st.session_state.narrative_log
-chat_history = st.session_state.chat_history
+engine: TorusEngine = st.session_state.engine
+narrative_log: list = st.session_state.narrative_log
+chat_history: list = st.session_state.chat_history
+
+# --- Sidebar for Document Processing and Model I/O ---
+st.sidebar.divider()
+st.sidebar.header("📄 Document Processing")
+uploaded_doc = st.sidebar.file_uploader("Upload Document (PDF, DOCX, TXT)", type=['pdf', 'docx', 'txt'], key="doc_uploader")
+
+if st.sidebar.button("Process Uploaded Document", key="process_doc_btn"):
+    if uploaded_doc is not None:
+        with st.spinner(f"Processing {uploaded_doc.name}..."):
+            try:
+                # parse_document expects a file-like object (BytesIO for uploaded files) and filename
+                document_text = parse_document(uploaded_doc, uploaded_doc.name)
+                if document_text:
+                    st.sidebar.success(f"Extracted {len(document_text)} characters from {uploaded_doc.name}.")
+                    # Populate graph (modifies engine.cg in place)
+                    populate_graph_from_text(document_text, engine.cg, engine.state)
+                    st.sidebar.success(f"Document content processed into concept graph.")
+                    # Update chat history
+                    chat_history.append({
+                        "query": f"Processed Document: {uploaded_doc.name}",
+                        "response": f"Extracted {len(document_text)} chars. Nodes: {len(engine.cg.nodes)}, Edges: {len(engine.cg.edges)}",
+                        "type": "system"
+                    })
+                    st.rerun()
+                else:
+                    st.sidebar.error(f"Could not extract text from {uploaded_doc.name}.")
+            except Exception as e:
+                st.sidebar.error(f"Error processing document: {e}")
+    else:
+        st.sidebar.warning("Please upload a document first.")
+
+st.sidebar.divider()
+st.sidebar.header("💾 Engine State (Save/Load)")
+
+# Save Engine State
+# We use a button to trigger the save, then provide a download link for the generated file.
+if st.sidebar.button("Prepare Engine State for Download", key="save_engine_btn"):
+    with st.spinner("Saving engine state..."):
+        # Define a temporary path or use BytesIO if st.download_button can handle it directly
+        # For simplicity, saving to a fixed name then offering for download.
+        # In a multi-user scenario, unique filenames or BytesIO would be better.
+        save_file_name = "torusai_engine_state.json"
+        if save_engine_state(engine, save_file_name):
+            st.session_state.engine_state_to_download = save_file_name
+            st.sidebar.success(f"Engine state prepared as {save_file_name}.")
+        else:
+            st.sidebar.error("Failed to save engine state.")
+
+if 'engine_state_to_download' in st.session_state and st.session_state.engine_state_to_download:
+    with open(st.session_state.engine_state_to_download, "rb") as fp:
+        st.sidebar.download_button(
+            label="Download Engine State",
+            data=fp,
+            file_name=st.session_state.engine_state_to_download,
+            mime="application/json"
+        )
+    # Clean up session state var after offering download
+    # st.session_state.engine_state_to_download = None # Keep it available until next action
+
+# Load Engine State
+uploaded_state_file = st.sidebar.file_uploader("Upload Engine State File (.json)", type=['json'], key="state_uploader")
+if st.sidebar.button("Load Engine State", key="load_engine_btn"):
+    if uploaded_state_file is not None:
+        with st.spinner(f"Loading engine state from {uploaded_state_file.name}..."):
+            try:
+                # Create a new engine instance to load into, or modify current one
+                # For simplicity, we'll re-initialize and then load.
+                # This ensures clean slate before loading.
+                new_engine, new_narrative_log = initialize_engine()
+                
+                # Save to a temporary file to pass its path to load_engine_state
+                temp_load_path = "temp_loaded_state.json"
+                with open(temp_load_path, "wb") as f:
+                    f.write(uploaded_state_file.getvalue())
+
+                if load_engine_state(temp_load_path, new_engine):
+                    st.session_state.engine = new_engine
+                    st.session_state.narrative_log = new_narrative_log # Reset narrative log with new engine
+                    st.session_state.chat_history.append({
+                        "query": f"Loaded Engine State: {uploaded_state_file.name}",
+                        "response": f"Nodes: {len(new_engine.cg.nodes)}, Edges: {len(new_engine.cg.edges)}",
+                        "type": "system"
+                    })
+                    st.sidebar.success("Engine state loaded successfully.")
+                    if os.path.exists(temp_load_path):
+                        os.remove(temp_load_path)
+                    st.rerun()
+                else:
+                    st.sidebar.error("Failed to load engine state.")
+                    if os.path.exists(temp_load_path):
+                        os.remove(temp_load_path)
+            except Exception as e:
+                st.sidebar.error(f"Error loading engine state: {e}")
+    else:
+        st.sidebar.warning("Please upload an engine state file first.")
+
 
 # --- Main Interaction Area ---
 st.header("Interactive Query")
@@ -131,10 +231,30 @@ with col2:
             elif entry["type"] == "status":
                  st.markdown(f"*{entry['query']}*")
                  st.markdown(entry['response'], unsafe_allow_html=True) # For markdown in status
+            elif entry["type"] == "system": # For system messages like doc processing, load/save
+                 st.markdown(f"**System:** {entry['query']}")
+                 st.markdown(f"{entry['response']}")
             st.markdown("---")
 
+# Moved Engine Parameters and Concept Graph to main area for better visibility if sidebar is busy
+st.divider()
+col_params, col_cg_nodes, col_cg_edges = st.columns(3)
+with col_params:
+    st.subheader("⚙️ Engine Parameters")
+    st.json(engine.params, expanded=False)
+with col_cg_nodes:
+    st.subheader("🕸️ Concept Graph Nodes")
+    st.metric(label="Node Count", value=len(engine.cg.nodes))
+    if st.checkbox("Show Nodes JSON", key="show_nodes_json", value=False):
+        st.json(engine.cg.nodes, expanded=False)
+with col_cg_edges:
+    st.subheader("🔗 Concept Graph Edges")
+    st.metric(label="Edge Count", value=len(engine.cg.edges))
+    if st.checkbox("Show Edges JSON", key="show_edges_json", value=False):
+        st.json({str(k): v for k, v in engine.cg.edges.items()}, expanded=False)
 
-st.sidebar.header("Engine Parameters")
+
+st.sidebar.info("This dashboard provides an interface to interact with and manage the TorusAI engine.")
 st.sidebar.json(engine.params)
 
 st.sidebar.header("Concept Graph")
