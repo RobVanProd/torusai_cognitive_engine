@@ -30,7 +30,7 @@ class EnhancedLanguageGenerator:
     DEFAULT_SUBJECT_WORD: str = "thing"
     DEFAULT_VERB_WORD: str = "do"
     DEFAULT_OBJECT_WORD: str = "something"
-    DEFAULT_UNKNOWN_RESPONSE: str = "I'm not sure how to respond to that."
+    DEFAULT_UNKNOWN_RESPONSE: str = "I'm not sure how to respond to that yet."
 
 
     def __init__(self, cg_instance: 'EnhancedConceptGraph', narrative_log_list: List[str]):
@@ -78,7 +78,6 @@ class EnhancedLanguageGenerator:
 
         node_data = self.cg.nodes.get(cid)
         if not node_data:
-            # Fallback for missing node ID based on role
             if role == "subject": return self.DEFAULT_SUBJECT_WORD
             if role == "verb_base" or role == "verb_present": return self.DEFAULT_VERB_WORD
             if role == "object" or role == "attribute": return self.DEFAULT_OBJECT_WORD
@@ -88,8 +87,6 @@ class EnhancedLanguageGenerator:
         base_form = word_forms.get("base", str(cid))
         
         if role == "subject":
-            # TODO: Use linguistic features from node_data if available (e.g., number: singular/plural)
-            # For now, assume singular unless is_plural_subject is True (which is not yet dynamically set)
             return base_form
         if role == "object" or role == "attribute":
             return base_form
@@ -107,24 +104,37 @@ class EnhancedLanguageGenerator:
         if engine_state is None:
             engine_state = {}
 
-        generated_sentence = self.DEFAULT_UNKNOWN_RESPONSE
-        is_plural_subject = False # TODO: Determine from context or node data
+        generated_sentence = self.DEFAULT_UNKNOWN_RESPONSE 
+        is_plural_subject = False 
         is_question = "?" in query_string
-        log_prefix = "[Gen]" # For debugging generation path
+        log_prefix = "[Gen]" 
 
-        # 1. Parse Query with spaCy (if available) & Identify Key Query Concepts
-        key_query_concepts_data: List[Dict[str, str]] = [] # Store as {'text': str, 'type': 'noun_chunk'/'entity'/'verb'}
+        # print(f"\nLG: Received query: '{query_string}'") # Debug
+
+        # 1. Parse Query with spaCy & Identify Key Query Concepts
+        key_query_concepts_data: List[Dict[str, str]] = [] 
+        query_root_verb: Optional[str] = None
+
         if NLP_SPACY_LG and query_string:
-            query_doc = NLP_SPACY_LG(query_string.lower())
+            log_prefix = "[QuerySpaCy]"
+            query_doc = NLP_SPACY_LG(query_string.lower()) 
             for chunk in query_doc.noun_chunks:
                 key_query_concepts_data.append({"text": chunk.lemma_.lower().strip(), "type": "noun_chunk"})
             for ent in query_doc.ents:
-                key_query_concepts_data.append({"text": ent.lemma_.lower().strip(), "type": ent.label_}) # Store entity type
+                key_query_concepts_data.append({"text": ent.lemma_.lower().strip(), "type": ent.label_})
+            
             for token in query_doc:
                 if token.dep_ == "ROOT" and token.pos_ == "VERB":
-                    key_query_concepts_data.append({"text": token.lemma_.lower(), "type": "root_verb"})
+                    query_root_verb = token.lemma_.lower()
+                    if query_root_verb not in self.cg.nodes and query_root_verb not in ["be", "do", "have"]: 
+                         self.cg.addEnhancedNode(query_root_verb, linguistics={"wordForms":{"base":query_root_verb}}, properties={"pos":"VERB", "source":"query_verb"})
+                    key_query_concepts_data.append({"text": query_root_verb, "type": "root_verb"})
+                    break 
             
-            # Deduplicate based on text
+            for token in query_doc:
+                if token.is_alpha and not token.is_stop and token.lemma_.lower() not in [item['text'] for item in key_query_concepts_data]:
+                    key_query_concepts_data.append({"text": token.lemma_.lower(), "type": "token"})
+            
             unique_concepts_text = set()
             temp_list = []
             for item in key_query_concepts_data:
@@ -132,54 +142,58 @@ class EnhancedLanguageGenerator:
                     temp_list.append(item)
                     unique_concepts_text.add(item["text"])
             key_query_concepts_data = temp_list
-            log_prefix = "[QuerySpaCy]"
+            # print(f"LG: Key query concepts data: {key_query_concepts_data}") # Debug
 
 
         # 2. Query-Driven Graph Search & Response Formulation
         if key_query_concepts_data:
             primary_query_concept_info = key_query_concepts_data[0]
             primary_concept_text = primary_query_concept_info["text"]
+            # print(f"LG: Primary query concept: '{primary_concept_text}'") # Debug
 
             if primary_concept_text in self.cg.nodes:
-                found_relations: List[Tuple[str, str, str, float]] = [] # s_word, relation_word, t_word, weight
+                # print(f"LG: Primary query concept '{primary_concept_text}' found in graph.") # Debug
+                found_relations: List[Tuple[str, str, str, float]] = [] 
+                
                 for (s_cid, t_cid), edge_data in self.cg.edges.items():
                     relation = edge_data.get("relation", "is related to")
                     weight = edge_data.get("weight", 0.0)
                     
-                    if s_cid == primary_concept_text: # Outgoing relation
-                        s_word = self._get_concept_word(s_cid, "subject")
-                        t_word = self._get_concept_word(t_cid, "object")
+                    s_word = self._get_concept_word(s_cid, "subject")
+                    t_word = self._get_concept_word(t_cid, "object")
+
+                    if s_cid == primary_concept_text and t_cid not in [item['text'] for item in key_query_concepts_data if item['text'] != primary_concept_text]: 
                         found_relations.append((s_word, relation, t_word, weight))
-                    elif t_cid == primary_concept_text: # Incoming relation
-                        s_word = self._get_concept_word(s_cid, "subject")
-                        t_word = self._get_concept_word(t_cid, "object") 
-                        found_relations.append((s_word, f"{relation} (of/by/to)", t_word, weight)) 
+                    elif t_cid == primary_concept_text and s_cid not in [item['text'] for item in key_query_concepts_data if item['text'] != primary_concept_text]: 
+                        found_relations.append((s_word, f"{relation} (to/by/of)", t_word, weight)) 
                 
+                # print(f"LG: Found relations for '{primary_concept_text}': {found_relations[:3]}") # Debug
+
                 if found_relations:
-                    found_relations.sort(key=lambda x: -x[3]) # Sort by edge weight
+                    found_relations.sort(key=lambda x: -x[3]) 
                     s_w, r_w, o_w, _ = found_relations[0]
                     
-                    # Basic conjugation/phrasing for the relation
                     verb_present = self._conjugate_present(r_w.replace("verb_",""), is_plural_subject) if r_w.startswith("verb_") else r_w
 
                     if is_question:
-                         # Very basic question answering attempt
-                        if any(q_word in query_string.lower() for q_word in ["what is", "define", "tell me about"]) and \
-                           primary_concept_text.lower() in s_w.lower():
-                            generated_sentence = f"{s_w} {verb_present} {o_w}."
+                        if query_root_verb and query_root_verb in ["be", "is", "are", "what", "who", "where", "when", "why", "how"]:
+                             generated_sentence = f"{s_w} {verb_present} {o_w}."
                         else:
-                            generated_sentence = f"Regarding {primary_concept_text}, one known relation is: {s_w} {verb_present} {o_w}."
-                    else:
+                             generated_sentence = f"Is it that {s_w} {verb_present} {o_w}?"
+                    else: 
                         generated_sentence = f"{s_w} {verb_present} {o_w}."
-                    
+                        
                     self.narrative.append(f"{log_prefix}[GraphDirect] {generated_sentence}")
                     return generated_sentence
+            # else:
+                # print(f"LG: Primary query concept '{primary_concept_text}' NOT found in graph.") # Debug
 
-        # 3. Try to use highly relevant retrieved patterns (if query-driven failed or no query concepts)
+
+        # 3. Try to use highly relevant retrieved patterns
         retrieved_patterns: List[Tuple[str, str, Dict[str, Any], float]] = engine_state.get("retrieved_patterns", [])
-        if retrieved_patterns and retrieved_patterns[0][3] > 0.75: # Threshold for using pattern
+        # print(f"LG: Retrieved patterns (top 1 if any): {retrieved_patterns[:1]}") # Debug
+        if retrieved_patterns and retrieved_patterns[0][3] > 0.75: 
             pattern_response = retrieved_patterns[0][1]
-            # TODO: Adapt response based on current query vs. pattern's trigger
             generated_sentence = pattern_response
             self.narrative.append(f"{log_prefix}[PatternBased] {generated_sentence}")
             return generated_sentence
@@ -194,7 +208,6 @@ class EnhancedLanguageGenerator:
             verb_cid = source_concepts[1].get("id") if len(source_concepts) > 1 else None
             obj_cid = source_concepts[2].get("id") if len(source_concepts) > 2 else None
 
-            # Ensure default CIDs are used if any part is None
             subj_cid = subj_cid or self.DEFAULT_SUBJECT_CID
             verb_cid = verb_cid or self.DEFAULT_VERB_CID
             obj_cid = obj_cid or self.DEFAULT_OBJECT_CID
@@ -208,32 +221,31 @@ class EnhancedLanguageGenerator:
                 if cid_default in [subj_cid, verb_cid, obj_cid] and cid_default not in self.cg.nodes:
                     self.cg.addEnhancedNode(cid_default, linguistics={"wordForms": {"base": word_default}})
 
-            template_key = "question_what" if is_question else "statement"
-            chosen_template = self.templates.get(template_key, self.templates["statement_svo"]) # Default to SVO statement
+            template_key = "question_what" if is_question else "statement_svo"
+            chosen_template = self.templates.get(template_key, self.templates["statement_svo"])
             
             try:
                 generated_sentence = chosen_template.format(
                     subject=self._get_concept_word(subj_cid, "subject", is_plural_subject),
-                    verb_base=self._get_concept_word(verb_cid, "verb_base"),
-                    verb_present=self._get_concept_word(verb_cid, "verb_present", is_plural_subject),
+                    verb_base=self._get_concept_word(verb_cid, "verb_base"), 
+                    verb_present=self._get_concept_word(verb_cid, "verb_present", is_plural_subject), 
                     object=self._get_concept_word(obj_cid, "object"),
-                    attribute=self._get_concept_word(obj_cid, "attribute") # For statement_sa if obj_cid is used as attribute
+                    attribute=self._get_concept_word(obj_cid, "attribute") 
                 ).strip()
                 log_prefix = f"{log_prefix}[FallbackSVO]"
-            except KeyError: # If template is missing a key used by format
+            except KeyError as e: 
+                # print(f"LG: Template key error: {e}. Using generic fallback.") # Debug
                 generated_sentence = f"{self._get_concept_word(subj_cid, 'subject')} is related to {self._get_concept_word(obj_cid, 'object')}."
                 log_prefix = f"{log_prefix}[FallbackGeneric]"
-
-        # Final fallback if all else fails
+        
         if not generated_sentence.strip() or generated_sentence == self.DEFAULT_UNKNOWN_RESPONSE :
              if source_concepts and source_concepts[0].get("id"):
                  focused_concept = self._get_concept_word(source_concepts[0]["id"], "subject")
                  generated_sentence = self.templates["simple_concept_focus"].format(concept=focused_concept)
                  log_prefix = f"{log_prefix}[Focus]"
-             else: # Absolute fallback
+             else: 
                  generated_sentence = self.DEFAULT_UNKNOWN_RESPONSE
                  log_prefix = f"{log_prefix}[DefaultUnknown]"
-
 
         self.narrative.append(f"{log_prefix} {generated_sentence}")
         return generated_sentence
