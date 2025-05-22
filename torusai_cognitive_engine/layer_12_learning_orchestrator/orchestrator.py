@@ -1,6 +1,7 @@
 import time
 import hashlib
 import json
+import random # Added import for random.random()
 from collections import deque
 from typing import Any, Dict, List, Tuple, Optional, Deque
 import numpy as np # For embeddings
